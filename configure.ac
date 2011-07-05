@@ -23,16 +23,14 @@ AC_PROG_LN_S
 AC_PROG_MAKE_SET
 
 # Checks for libraries.
-# FIXME: Replace `main' with a function in `-lX11':
-#AC_CHECK_LIB([X11], [main])
-# FIXME: Replace `main' with a function in `-ljpeg':
-#AC_CHECK_LIB([jpeg], [main])
+AC_CHECK_LIB([X11], [XOpenDisplay])
+AC_CHECK_LIB([jpeg], [jpeg_start_decompress])
 AC_SEARCH_LIBS([pthread_key_create], [pthread])
 #AC_SEARCH_LIBS([MD5], [crypto])
 #AC_SEARCH_LIBS([json_object_new_object], [json])
 
 # Checks for header files.
-#AC_PATH_X
+AC_PATH_X
 AC_CHECK_HEADERS([arpa/inet.h fcntl.h netinet/in.h stddef.h stdint.h stdlib.h string.h sys/ioctl.h sys/socket.h sys/time.h unistd.h])
 
 # Checks for typedefs, structures, and compiler characteristics.

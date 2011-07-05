@@ -4,6 +4,7 @@
 #include <ioa/buffer.hpp>
 
 #include <iostream>
+#include <stdio.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <X11/Xlib.h>

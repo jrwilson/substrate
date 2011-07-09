@@ -1,16 +1,34 @@
-#include <ioa/ioa.hpp>
-#include <ioa/global_fifo_scheduler.hpp>
+#include "rfb.hpp"
 
 #include "x_rfb_client_automaton.hpp"
 #include "channel_automaton.hpp"
 
-#include "rfb.hpp"
-#include <arpa/inet.h>
+#include <ioa/global_fifo_scheduler.hpp>
+
 
 class rfb_server_automaton :
   public ioa::automaton
 {
 private:
+  struct rgb_t
+  {
+    union {
+      uint32_t val;
+      struct {
+  	uint8_t blue;
+  	uint8_t green;
+  	uint8_t red;
+  	uint8_t unused;
+      } little_endian;
+      struct {
+  	uint8_t unused;
+  	uint8_t red;
+  	uint8_t green;
+  	uint8_t blue;
+      } big_endian;
+    };
+  };
+  
   std::queue<ioa::const_shared_ptr<ioa::buffer_interface> > m_sendq;
   ioa::buffer m_buffer;
 
@@ -18,30 +36,35 @@ private:
   bool m_send_security_types;
   bool m_send_security_type;
   bool m_send_security_result;
-  bool m_send_init;
+  bool m_send_server_init;
 
+  bool m_recv_ignore;
   bool m_recv_protocol_version;
   bool m_recv_security_type;
-  bool m_recv_init;
+  bool m_recv_client_init;
+  bool m_recv_set_pixel_format;
+  bool m_recv_set_encodings;
+  bool m_recv_framebuffer_update_request;
+  bool m_recv_unknown_message;
 
-  const std::string m_supported_version;
-  std::string m_version;
-  rfb_security_t m_security_type;
-  uint32_t m_security_result;
-
-  static const uint16_t WIDTH = 640;
-  static const uint16_t HEIGHT = 480;
-  static const uint8_t BITS_PER_PIXEL = 32;
-  static const uint8_t DEPTH = 24;
-  const uint8_t BIG_ENDIAN_FLAG;
-  static const uint8_t TRUE_COLOUR_FLAG = 1;
-  static const uint16_t RED_MAX = 255;
-  static const uint16_t GREEN_MAX = 255;
-  static const uint16_t BLUE_MAX = 255;
-  static const uint8_t RED_SHIFT = 0;
-  static const uint8_t GREEN_SHIFT = 0;
-  static const uint8_t BLUE_SHIFT = 0;
-  const std::string m_name;
+  const rfb::protocol_version_t HIGHEST_VERSION;
+  rfb::protocol_version_t m_protocol_version;
+  bool m_connect_error;
+  std::set<rfb::security_t> m_security_types;
+  rfb::security_t m_security;
+  const rfb::pixel_format_t PIXEL_FORMAT;
+  static const uint16_t WIDTH = 240;
+  static const uint16_t HEIGHT = 160;
+  const rfb::server_init_t SERVER_INIT;
+  rfb::pixel_format_t m_client_format;
+  std::vector<int32_t> m_client_encodings;
+  rgb_t m_data[WIDTH * HEIGHT];
+  bool m_image_changed;
+  bool m_outstanding_request;
+  uint16_t m_request_x0;
+  uint16_t m_request_y0;
+  uint16_t m_request_x1;
+  uint16_t m_request_y1;
 
 public:
   rfb_server_automaton () :
@@ -49,14 +72,47 @@ public:
     m_send_security_types (false),
     m_send_security_type (false),
     m_send_security_result (false),
-    m_send_init (false),
+    m_send_server_init (false),
+    m_recv_ignore (true),
     m_recv_protocol_version (false),
     m_recv_security_type (false),
-    m_recv_init (false),
-    m_supported_version (RFB_PROTOCOL_VERSION_3_8, RFB_PROTOCOL_VERSION_STRING_LENGTH),
-    m_security_type (RFB_SECURITY_INVALID),
-    BIG_ENDIAN_FLAG (ntohl (1) == 1)
+    m_recv_client_init (false),
+    m_recv_set_pixel_format (false),
+    m_recv_set_encodings (false),
+    m_recv_framebuffer_update_request (false),
+    m_recv_unknown_message (false),
+    HIGHEST_VERSION (rfb::PROTOCOL_VERSION_3_3),
+    m_connect_error (false),
+    PIXEL_FORMAT (32, 24, ntohl (1) == 1, true, 255, 255, 255, 16, 8, 0),
+    SERVER_INIT (WIDTH, HEIGHT, PIXEL_FORMAT, ""),
+    m_client_format (PIXEL_FORMAT),
+    m_image_changed (false),
+    m_outstanding_request (false)
   {
+    m_security_types.insert (rfb::NONE);
+    std::cout << "server: big_endian = " << int (PIXEL_FORMAT.big_endian_flag) << std::endl;
+
+    rgb_t color;
+    const uint8_t red = 0x00; //0x12;
+    const uint8_t green = 0x00; //0x34;
+    const uint8_t blue = 0x00; //0x56;
+    if (PIXEL_FORMAT.big_endian_flag) {
+      color.big_endian.red = red;
+      color.big_endian.green = green;
+      color.big_endian.blue = blue;
+    }
+    else {
+      color.little_endian.red = red;
+      color.little_endian.green = green;
+      color.little_endian.blue = blue;
+    }
+
+    for (uint16_t y = 0; y < HEIGHT; ++y) {
+      for (uint16_t x = 0; x < WIDTH; ++x) {
+	m_data[y * WIDTH + x] = color;
+      }
+    }
+    
     schedule ();
   }
 
@@ -74,11 +130,17 @@ private:
     if (send_security_result_precondition ()) {
       ioa::schedule (&rfb_server_automaton::send_security_result);
     }
-    if (send_init_precondition ()) {
-      ioa::schedule (&rfb_server_automaton::send_init);
+    if (send_server_init_precondition ()) {
+      ioa::schedule (&rfb_server_automaton::send_server_init);
+    }
+    if (send_framebuffer_update_precondition ()) {
+      ioa::schedule (&rfb_server_automaton::send_framebuffer_update);
     }
     if (send_precondition ()) {
       ioa::schedule (&rfb_server_automaton::send);
+    }
+    if (recv_ignore_precondition ()) {
+      ioa::schedule (&rfb_server_automaton::recv_ignore);
     }
     if (recv_protocol_version_precondition ()) {
       ioa::schedule (&rfb_server_automaton::recv_protocol_version);
@@ -86,113 +148,172 @@ private:
     if (recv_security_type_precondition ()) {
       ioa::schedule (&rfb_server_automaton::recv_security_type);
     }
-    if (recv_init_precondition ()) {
-      ioa::schedule (&rfb_server_automaton::recv_init);
+    if (recv_client_init_precondition ()) {
+      ioa::schedule (&rfb_server_automaton::recv_client_init);
     }
+    if (recv_set_pixel_format_precondition ()) {
+      ioa::schedule (&rfb_server_automaton::recv_set_pixel_format);
+    }
+    if (recv_set_encodings_precondition ()) {
+      ioa::schedule (&rfb_server_automaton::recv_set_encodings);
+    }
+    if (recv_framebuffer_update_request_precondition ()) {
+      ioa::schedule (&rfb_server_automaton::recv_framebuffer_update_request);
+    }
+    if (recv_unknown_message_precondition ()) {
+      ioa::schedule (&rfb_server_automaton::recv_unknown_message);
+    }
+
+    if (update_image_precondition ()) {
+      ioa::schedule (&rfb_server_automaton::update_image);
+    }
+
+    bool some_recv = m_recv_protocol_version || m_recv_security_type || m_recv_client_init || m_recv_set_pixel_format || m_recv_set_encodings || m_recv_framebuffer_update_request || m_recv_unknown_message;
+    assert ((m_recv_ignore && !some_recv) || (!m_recv_ignore && some_recv));
   }
 
-  // Send the protocol version to the client.
+  // Send the ProtocolVersion message.
   bool send_protocol_version_precondition () const {
     return m_send_protocol_version;
   }
 
   void send_protocol_version_effect () {
     std::cout << "server: " << __func__ << std::endl;
-    m_sendq.push (ioa::const_shared_ptr<ioa::buffer> (new ioa::buffer (m_supported_version.c_str (), m_supported_version.size ())));
+    ioa::buffer* buf = new ioa::buffer ();
+    HIGHEST_VERSION.write_to_buffer (*buf);
+    m_sendq.push (ioa::const_shared_ptr<ioa::buffer_interface> (buf));
     m_send_protocol_version = false;
+    m_recv_ignore = false;
     m_recv_protocol_version = true;
   }
 
   UP_INTERNAL (rfb_server_automaton, send_protocol_version);
 
-  // Send the security types.
+  // Send the SecurityTypes message.
   bool send_security_types_precondition () const {
     return m_send_security_types;
   }
 
   void send_security_types_effect () {
     std::cout << "server: " << __func__ << std::endl;
-    ioa::buffer* buf = new ioa::buffer (2);
-    uint8_t* data = static_cast<uint8_t*> (buf->data ());
-    // Number of security types comes first.
-    data[0] = 1;
-    // Then the types.
-    data[1] = RFB_SECURITY_NONE;
-    m_sendq.push (ioa::const_shared_ptr<ioa::buffer_interface> (buf));
-    m_send_security_types = false;
-    m_recv_security_type = true;
+    if (!m_connect_error) {
+      ioa::buffer* buf = new ioa::buffer ();
+      rfb::security_types_t msg (m_security_types);
+      msg.write_to_buffer (*buf);
+      m_sendq.push (ioa::const_shared_ptr<ioa::buffer_interface> (buf));
+      m_send_security_types = false;
+      m_recv_ignore = false;
+      m_recv_security_type = true;
+    }
+    else {
+      // TODO
+      assert (false);
+    }
   }
 
   UP_INTERNAL (rfb_server_automaton, send_security_types);
 
-  // Send the security type.
+  // Send the SecurityType message.
   bool send_security_type_precondition () const {
     return m_send_security_type;
   }
 
   void send_security_type_effect () {
-    // TODO
-    assert (false);
+    std::cout << "server: " << __func__ << std::endl;
+
+    m_send_security_type = false;
+
+    if (!m_connect_error) {
+      ioa::buffer* buf = new ioa::buffer ();
+      // We only support no security.
+      m_security = rfb::NONE;
+      rfb::security_type_t msg (m_security);
+      msg.write_to_buffer (*buf);
+      m_sendq.push (ioa::const_shared_ptr<ioa::buffer_interface> (buf));
+      m_recv_ignore = false;
+      m_recv_client_init = true;
+    }
+    else {
+      // TODO
+      assert (false);
+    }
   }
 
   UP_INTERNAL (rfb_server_automaton, send_security_type);
 
-  // Send the security result.
+  // Send the SecurityResult message.
   bool send_security_result_precondition () const {
     return m_send_security_result;
   }
 
   void send_security_result_effect () {
     std::cout << "server: " << __func__ << std::endl;
-    uint32_t res = htonl (m_security_result);
-    m_sendq.push (ioa::const_shared_ptr<ioa::buffer_interface> (new ioa::buffer (&res, sizeof (uint32_t))));
-    if (m_security_result == 1 && m_version >= RFB_PROTOCOL_VERSION_3_8) {
+    ioa::buffer* buf = new ioa::buffer ();
+    // We only support no security.
+    rfb::security_result_t msg (m_security == rfb::NONE);
+    msg.write_to_buffer (*buf);
+    m_sendq.push (ioa::const_shared_ptr<ioa::buffer_interface> (buf));
+
+    if (m_security != rfb::NONE && m_protocol_version >= rfb::PROTOCOL_VERSION_3_8) {
       // Send error message.
       // TODO
       assert (false);
     }
 
     m_send_security_result = false;
-    m_recv_init = true;
+    m_recv_ignore = false;
+    m_recv_client_init = true;
   }
 
   UP_INTERNAL (rfb_server_automaton, send_security_result);
 
-  // Send the init message.
-  bool send_init_precondition () const {
-    return m_send_init;
+  // Send the ServerInit message.
+  bool send_server_init_precondition () const {
+    return m_send_server_init;
   }
 
-  void send_init_effect () {
+  void send_server_init_effect () {
     std::cout << "server: " << __func__ << std::endl;
-
-    server_init_t init;
-    init.framebuffer_width = WIDTH;
-    init.framebuffer_height = HEIGHT;
-    init.server_pixel_format.bits_per_pixel = BITS_PER_PIXEL;
-    init.server_pixel_format.depth = DEPTH;
-    init.server_pixel_format.big_endian_flag = BIG_ENDIAN_FLAG;
-    init.server_pixel_format.true_colour_flag = TRUE_COLOUR_FLAG;
-    init.server_pixel_format.red_max = RED_MAX;
-    init.server_pixel_format.green_max = GREEN_MAX;
-    init.server_pixel_format.blue_max = BLUE_MAX;
-    init.server_pixel_format.red_shift = RED_SHIFT;
-    init.server_pixel_format.green_shift = GREEN_SHIFT;
-    init.server_pixel_format.blue_shift = BLUE_SHIFT;
-    init.name_length = m_name.size ();
-
-    init.host_to_net ();
-
-    ioa::buffer* buf = new ioa::buffer (sizeof (server_init_t) + m_name.size ());
-    memcpy (buf->data (), &init, sizeof (server_init_t));
-    memcpy (static_cast<char *> (buf->data ()) + sizeof (server_init_t), m_name.c_str (), m_name.size ());
-
+    ioa::buffer* buf = new ioa::buffer ();
+    SERVER_INIT.write_to_buffer (*buf);
     m_sendq.push (ioa::const_shared_ptr<ioa::buffer_interface> (buf));
 
-    m_send_init = false;
+    m_send_server_init = false;
+    m_recv_ignore = false;
+    m_recv_set_pixel_format = true;
+    m_recv_set_encodings = true;
+    m_recv_framebuffer_update_request = true;
+    m_recv_unknown_message = true;
   }
 
-  UP_INTERNAL (rfb_server_automaton, send_init);
+  UP_INTERNAL (rfb_server_automaton, send_server_init);
+
+  // Send the FramebufferUpdate message.
+  bool send_framebuffer_update_precondition () const {
+    return m_outstanding_request && m_image_changed;
+  }
+
+  void send_framebuffer_update_effect () {
+    std::cout << "server: " << __func__ << std::endl;
+    ioa::buffer* buf = new ioa::buffer ();
+    rfb::framebuffer_update_t update;
+    update.add_rectangle (new rfb::raw_rectangle_t (m_request_x0,
+						    m_request_y0,
+						    m_request_x1 - m_request_x0,
+						    m_request_y1 - m_request_y0));
+    update.write_to_buffer (*buf,
+			    PIXEL_FORMAT,
+			    m_client_format,
+			    m_data,
+			    WIDTH,
+			    HEIGHT);
+    m_sendq.push (ioa::const_shared_ptr<ioa::buffer_interface> (buf));
+    
+    m_outstanding_request = false;
+    m_image_changed = false;
+  }
+
+  UP_INTERNAL (rfb_server_automaton, send_framebuffer_update);
 
   // Send a message.
   bool send_precondition () const {
@@ -209,112 +330,206 @@ public:
   V_UP_OUTPUT (rfb_server_automaton, send, ioa::const_shared_ptr<ioa::buffer_interface>);
   
 private:
-  // Append received bytes to a buffer.
-  void append (const ioa::const_shared_ptr<ioa::buffer_interface>& val) {
-    const size_t original_size = m_buffer.size ();
-    m_buffer.resize (original_size + val->size ());
-    memcpy (static_cast<char *> (m_buffer.data ()) + original_size, val->data (), val->size ());
+  // Ignore received bytes.
+  bool recv_ignore_precondition () const {
+    return m_recv_ignore && !m_buffer.empty ();
   }
 
-  // Remove processed bytes from a buffer.
-  void consume (const size_t nbytes) {
-    const size_t new_size = m_buffer.size () - nbytes;
-    memmove (m_buffer.data (), static_cast<char *> (m_buffer.data ()) + nbytes, new_size);
-    m_buffer.resize (new_size);
+  void recv_ignore_effect () {
+    std::cerr << "server: ignoring " << m_buffer.size () << " bytes" << std::endl;
+    m_buffer.clear ();
   }
 
-  // Receive the protocol version message.
+  UP_INTERNAL (rfb_server_automaton, recv_ignore);
+
+  // Receive the ProtocolVersion message.
   bool recv_protocol_version_precondition () const {
-    return m_recv_protocol_version && m_buffer.size () >= RFB_PROTOCOL_VERSION_STRING_LENGTH;
+    return m_recv_protocol_version && rfb::protocol_version_t::could_read_from_buffer (m_buffer);
   }
 
   void recv_protocol_version_effect () {
     std::cout << "server: " << __func__ << std::endl;
-    // Get the protocol version returned by the client.
-    std::string client_version (static_cast<const char*> (m_buffer.data ()), RFB_PROTOCOL_VERSION_STRING_LENGTH);
-    consume (RFB_PROTOCOL_VERSION_STRING_LENGTH);
-    
-    if (((client_version == RFB_PROTOCOL_VERSION_3_3) ||
-	 (client_version == RFB_PROTOCOL_VERSION_3_7) ||
-	 (client_version == RFB_PROTOCOL_VERSION_3_8)) &&
-	client_version <= m_supported_version) {
-      // Use the version returned by the client.
-      m_version = client_version;
-      std::cout << "server: protocol version = " << m_version;
-      m_recv_protocol_version = false;
+    m_protocol_version.read_from_buffer (m_buffer);
 
-      if (m_version >= RFB_PROTOCOL_VERSION_3_7) {
-	m_send_security_types = true;
-      }
-      else {
-	m_send_security_type = true;
-      }
+    m_recv_protocol_version = false;
+
+    if (!((m_protocol_version == rfb::PROTOCOL_VERSION_3_3) ||
+	  (m_protocol_version == rfb::PROTOCOL_VERSION_3_7) ||
+	  (m_protocol_version == rfb::PROTOCOL_VERSION_3_8))) {
+      // The client sent us a version we don't understand.
+      // Ignore them.
+      m_protocol_version = HIGHEST_VERSION;
+      m_connect_error = true;
+    }
+
+    // The client wants to use a protocol we understand.
+    std::string s (m_protocol_version.version, rfb::PROTOCOL_VERSION_STRING_LENGTH - 1);
+    std::cout << "server: protocol version = " << s << std::endl;;
+
+    if (m_protocol_version >= rfb::PROTOCOL_VERSION_3_7) {
+      m_send_security_types = true;
+      m_recv_ignore = true;
     }
     else {
-      // TODO:  Client requested an unsupported protocol version.
-      assert (false);
+      m_send_security_type = true;
+      m_recv_ignore = true;
     }
   }
 
   UP_INTERNAL (rfb_server_automaton, recv_protocol_version);
 
-  // Receive the security type.
+  // Receive the SecurityType message.
   bool recv_security_type_precondition () const {
-    return m_recv_security_type && m_buffer.size () >= 1;
+    return m_recv_security_type && rfb::security_type_t::could_read_from_buffer (m_buffer);
   }
 
   void recv_security_type_effect () {
     std::cout << "server: " << __func__ << std::endl;
-    const uint8_t* data = static_cast<const uint8_t*> (m_buffer.data ());
-    m_security_type = static_cast<rfb_security_t> (*data);
-    std::cout << "server: security type = " << int (m_security_type) << std::endl;
-    consume (1);
+    rfb::security_type_t msg;
+    msg.read_from_buffer (m_buffer);
     m_recv_security_type = false;
 
-    if (m_security_type == RFB_SECURITY_NONE) {
-      if (m_version >= RFB_PROTOCOL_VERSION_3_8) {
-	m_security_result = 0;
-	m_send_security_result = true;
-      }
-      else {
-	// TODO
-	assert (false);
-      }
-    }
-    else {
-      // Client chose security we don't have.
-      // TODO
-      assert (false);
-    }
+    m_security = msg.security;
+
+    m_send_security_result = true;
+    m_recv_ignore = true;
   }
 
   UP_INTERNAL (rfb_server_automaton, recv_security_type);
 
-  // Receive the init from the client.
-  bool recv_init_precondition () const {
-    return m_recv_init && m_buffer.size () >= 1;
+  // Receive the ClientInit message.
+  bool recv_client_init_precondition () const {
+    return m_recv_client_init && rfb::client_init_t::could_read_from_buffer (m_buffer);
   }
 
-  void recv_init_effect () {
+  void recv_client_init_effect () {
     std::cout << "server: " << __func__ << std::endl;
-    // We are going to explicity ignore the share flag.
-    consume (1);
-    m_recv_init = false;
-    m_send_init = true;
+    rfb::client_init_t msg;
+    msg.read_from_buffer (m_buffer);
+    // We explicity ignore the share flag.
+    m_recv_client_init = false;
+    m_recv_ignore = true;
+    m_send_server_init = true;
   }
 
-  UP_INTERNAL (rfb_server_automaton, recv_init);
+  UP_INTERNAL (rfb_server_automaton, recv_client_init);
+
+  // Receive a SetPixelFormat message.
+  bool recv_set_pixel_format_precondition () const {
+    return m_recv_set_pixel_format && rfb::set_pixel_format_t::could_read_from_buffer (m_buffer);
+  }
+
+  void recv_set_pixel_format_effect () {
+    std::cout << "server: " << __func__ << std::endl;
+    rfb::set_pixel_format_t msg;
+    msg.read_from_buffer (m_buffer);
+    m_client_format = msg.pixel_format;
+  }
+
+  UP_INTERNAL (rfb_server_automaton, recv_set_pixel_format);
+
+  // Receive a SetEncodings message.
+  bool recv_set_encodings_precondition () const {
+    return m_recv_set_encodings && rfb::set_encodings_t::could_read_from_buffer (m_buffer);
+  }
+
+  void recv_set_encodings_effect () {
+    std::cout << "server: " << __func__ << std::endl;
+    rfb::set_encodings_t msg;
+    msg.read_from_buffer (m_buffer);
+    m_client_encodings = msg.encodings;
+  }
+
+  UP_INTERNAL (rfb_server_automaton, recv_set_encodings);
+
+  // Receive a FramebufferUpdateRequest message.
+  bool recv_framebuffer_update_request_precondition () const {
+    return m_recv_framebuffer_update_request && rfb::framebuffer_update_request_t::could_read_from_buffer (m_buffer);
+  }
+
+  void recv_framebuffer_update_request_effect () {
+    std::cout << "server: " << __func__ << std::endl;
+    rfb::framebuffer_update_request_t request;
+    request.read_from_buffer (m_buffer);
+
+    if (request.x_position < WIDTH &&
+	request.y_position < HEIGHT &&
+	request.width > 0 &&
+	request.height > 0) {
+      // Request will produce data.
+
+      // Correct out-of-bounds width and height.
+      const uint16_t new_width = std::min (WIDTH, uint16_t (request.x_position + request.width)) - request.x_position;
+      const uint16_t new_height = std::min (HEIGHT, uint16_t (request.y_position + request.height)) - request.y_position;
+
+      if (!m_outstanding_request) {
+	// If there is not outstanding request, send the bounds.
+	m_request_x0 = request.x_position;
+	m_request_y0 = request.y_position;
+	m_request_x1 = request.x_position + new_width;
+	m_request_y1 = request.y_position + new_height;
+	m_outstanding_request = true;
+      }
+      else {
+	// Expand the bounds.
+	m_request_x0 = std::min (m_request_x0, request.x_position);
+	m_request_y0 = std::min (m_request_y0, request.y_position);
+	m_request_x1 = std::max (m_request_x1, uint16_t (request.x_position + new_width));
+	m_request_y1 = std::max (m_request_y1, uint16_t (request.y_position + new_height));
+      }
+
+      std::cout << "New bounds (" << m_request_x0 << "," << m_request_y0 << ") -> (" << m_request_x1 << "," << m_request_y1 << ")" << std::endl;
+
+      if (!request.incremental) {
+	// Fake an image change to force an immediate FramebufferUpdate.
+	m_image_changed = true;
+      }
+    }
+  }
+
+  UP_INTERNAL (rfb_server_automaton, recv_framebuffer_update_request);
+
+  // Receive an unknown message.
+  bool recv_unknown_message_precondition () const {
+    return false;
+  }
+
+  void recv_unknown_message_effect () {
+    // TODO
+    assert (false);
+  }
+
+  UP_INTERNAL (rfb_server_automaton, recv_unknown_message);
 
   void receive_effect (const ioa::const_shared_ptr<ioa::buffer_interface>& val) {
     if (val.get () != 0) {
-      append (val);
+      m_buffer.append (*val.get ());
     }
   }
 
 public:
   V_UP_INPUT (rfb_server_automaton, receive, ioa::const_shared_ptr<ioa::buffer_interface>);
 
+private:
+  bool update_image_precondition () const {
+    return true;
+  }
+
+  void update_image_effect () {
+    for (uint16_t y = 0; y < HEIGHT; ++y) {
+      for (uint16_t x = 0; x < WIDTH; ++x) {
+	m_data[y * WIDTH + x].val = rand ();
+      }
+    }
+    m_image_changed = true;
+  }
+
+  UP_INTERNAL (rfb_server_automaton, update_image);
+
 };
+
+const uint16_t rfb_server_automaton::HEIGHT;
+const uint16_t rfb_server_automaton::WIDTH;
 
 class display_driver_automaton :
   public ioa::automaton

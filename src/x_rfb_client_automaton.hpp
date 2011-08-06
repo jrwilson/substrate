@@ -7,37 +7,280 @@
 
 #include <iostream>
 #include <queue>
+#include <functional>
 
 #include <fcntl.h>
 // #include <stdio.h>
 #include <X11/Xlib.h>
 
+// TODO:  Clean-up this file.
+
 class x_rfb_client_automaton :
   public ioa::automaton
 {
 private:
+
+  struct recv_protocol_version_gramel :
+    public rgram::gramel
+  {
+    x_rfb_client_automaton& m_client;
+    rfb::protocol_version_gramel m_protocol_version;
+
+    recv_protocol_version_gramel (x_rfb_client_automaton& client) :
+      m_client (client)
+    { }
+
+    void put (rgram::buffer& buf) {
+      assert (!done ());
+      m_protocol_version.put (buf);
+      if (done ()) {
+	m_client.recv_protocol_version (m_protocol_version.get ());
+      }
+    }
+
+    bool done () const {
+      return m_protocol_version.done ();
+    }
+
+    void reset () {
+      m_protocol_version.reset ();
+    }
+  };
+
+  struct recv_security_type_gramel :
+    public rgram::gramel
+  {
+    x_rfb_client_automaton& m_client;
+    rfb::security_type_gramel m_security_type;
+
+    recv_security_type_gramel (x_rfb_client_automaton& client) :
+      m_client (client)
+    { }
+
+    void put (rgram::buffer& buf) {
+      assert (!done ());
+      m_security_type.put (buf);
+      if (done ()) {
+	m_client.recv_security_type (m_security_type.get ());
+      }
+    }
+
+    bool done () const {
+      return m_security_type.done ();
+    }
+
+    void reset () {
+      m_security_type.reset ();
+    }
+  };
+
+  struct recv_server_init_gramel :
+    public rgram::gramel
+  {
+    x_rfb_client_automaton& m_client;
+    rfb::server_init_gramel m_init;
+
+    recv_server_init_gramel (x_rfb_client_automaton& client) :
+      m_client (client)
+    {
+    }
+
+    void put (rgram::buffer& buf) {
+      assert (!done ());
+      m_init.put (buf);
+      if (done ()) {
+	m_client.recv_server_init (m_init.get ());
+      }
+    }
+
+    bool done () const {
+      return m_init.done ();
+    }
+
+    void reset () {
+      m_init.reset ();
+    }
+  };
+
+  struct recv_server_message_gramel :
+    public rgram::gramel
+  {
+    x_rfb_client_automaton& m_client;
+    rfb::server_message_gramel m_message;
+
+    recv_server_message_gramel (x_rfb_client_automaton& client) :
+      m_client (client)
+    {
+    }
+
+    void put (rgram::buffer& buf) {
+      assert (!done ());
+      m_message.put (buf);
+      if (done ()) {
+	switch (m_message.m_choice.get ()) {
+	case rfb::FRAMEBUFFER_UPDATE_TYPE:
+	  m_client.recv_framebuffer_update ();
+	  break;
+	default:
+	  std::cerr << "Unknown server message.  Type = " << int (m_message.m_choice.get ()) << std::endl;
+	  abort ();
+	}
+	// Reset to start over.
+	m_message.reset ();
+      }
+    }
+
+    bool done () const {
+      return m_message.done ();
+    }
+
+    void reset () {
+      m_message.reset ();
+    }
+
+    void add_encoding (const int32_t type,
+		       rfb::pixel_data_gramel* gramel) {
+      m_message.add_encoding (type, gramel);
+    }
+  };
+
+  struct protocol_gramel :
+    public rgram::gramel
+  {
+    recv_protocol_version_gramel m_recv_protocol;
+    recv_security_type_gramel m_recv_security;
+    recv_server_init_gramel m_recv_init;
+    recv_server_message_gramel m_recv_server;
+    rgram::sequence_gramel m_sequence;
+
+    protocol_gramel (x_rfb_client_automaton& client) :
+      m_recv_protocol (client),
+      m_recv_security (client),
+      m_recv_init (client),
+      m_recv_server (client)
+    {
+      m_sequence.append (&m_recv_protocol);
+      m_sequence.append (&m_recv_security);
+      m_sequence.append (&m_recv_init);
+      m_sequence.append (&m_recv_server);
+    }
+    
+    void put (rgram::buffer& buf) {
+      assert (!done ());
+      m_sequence.put (buf);
+    }
+
+    bool done () const {
+      return m_sequence.done ();
+    }
+
+    void reset () {
+      m_sequence.reset ();
+    }
+
+    void add_encoding (const int32_t type,
+		       rfb::pixel_data_gramel* gramel) {
+      m_recv_server.add_encoding (type, gramel);
+    }
+  };
+
+  class pixel_gramel :
+    public rgram::gramel
+  {
+  private:
+    uint32_t m_uint;
+    uint8_t m_count;
+
+  public:
+    typedef uint32_t value_type;
+
+    pixel_gramel () :
+      m_count (0)
+    { }
+
+    void put (rgram::buffer& buf) {
+      assert (!done ());
+      m_count += buf.consume (&m_uint, sizeof (m_uint) - m_count);
+    }
+
+    bool done () const {
+      return m_count == sizeof (m_uint);
+    }
+
+    uint32_t get () const {
+      return m_uint;
+    }
+
+    void reset () {
+      m_count = 0;
+    }
+  };
+
+  struct raw_pixel_data_gramel :
+    public rfb::pixel_data_gramel
+  {
+    x_rfb_client_automaton& m_client;
+    uint16_t x_position;
+    uint16_t y_position;
+    uint16_t width;
+    uint16_t height;
+    uint16_t x_off;
+    uint16_t y_off;
+    pixel_gramel pixel;
+    bool dimensions_set;
+
+    raw_pixel_data_gramel (x_rfb_client_automaton& client) :
+      m_client (client),
+      x_off (0),
+      y_off (0),
+      dimensions_set (false)
+    { }
+
+    void put (rgram::buffer& buf) {
+      assert (!done ());
+
+      while (!done () && !buf.empty ()) {
+	pixel.put (buf);
+	if (pixel.done ()) {
+	  m_client.m_data[(y_position + y_off) * m_client.WIDTH + (x_position + x_off)] = pixel.get ();
+	  ++x_off;
+	  if (x_off == width) {
+	    x_off = 0;
+	    ++y_off;
+	  }
+	  pixel.reset ();
+	}
+      }
+    }
+
+    bool done () const {
+      return dimensions_set && y_off == height;
+    }
+
+    void reset () {
+      x_off = 0;
+      y_off = 0;
+      pixel.reset ();
+      dimensions_set = false;
+    }
+
+    void set_dimensions (const uint16_t xpos,
+			 const uint16_t ypos,
+			 const uint16_t w,
+			 const uint16_t h) {
+      x_position = xpos;
+      y_position = ypos;
+      width = w;
+      height = h;
+      dimensions_set = true;
+    }
+  };
+
+  raw_pixel_data_gramel m_raw_pixel_data;
+  protocol_gramel m_protocol;
   std::queue<ioa::const_shared_ptr<ioa::buffer_interface> > m_sendq;
-  ioa::buffer m_buffer;
-
-  bool m_send_protocol_version;
-  bool m_send_security_type;
-  bool m_send_client_init;
-  bool m_send_set_pixel_format;
-  bool m_send_set_encodings;
-  bool m_send_framebuffer_update_request;
-
-  bool m_recv_ignore;
-  bool m_recv_protocol_version;
-  bool m_recv_security_types;
-  bool m_recv_security_type;
-  bool m_recv_security_result;
-  bool m_recv_server_init;
-  bool m_recv_framebuffer_update;
-  bool m_recv_unknown_message;
-
   const rfb::protocol_version_t HIGHEST_VERSION;
   rfb::protocol_version_t m_protocol_version;
-  rfb::security_t m_security;
   rfb::pixel_format_t m_pixel_format;
   std::vector<int32_t> m_encodings;
   bool m_incremental;
@@ -66,29 +309,18 @@ private:
 
 public:
   x_rfb_client_automaton () :
-    m_send_protocol_version (false),
-    m_send_security_type (false),
-    m_send_client_init (false),
-    m_send_set_pixel_format (false),
-    m_send_set_encodings (false),
-    m_send_framebuffer_update_request (false),
-    m_recv_ignore (false),
-    m_recv_protocol_version (true),
-    m_recv_security_types (false),
-    m_recv_security_type (false),
-    m_recv_security_result (false),
-    m_recv_server_init (false),
-    m_recv_framebuffer_update (false),
-    m_recv_unknown_message (false),
+    m_raw_pixel_data (*this),
+    m_protocol (*this),
     HIGHEST_VERSION (rfb::PROTOCOL_VERSION_3_3),
     m_incremental (false), // Request entire screen first time.
     m_state (SCHEDULE_READ_READY)
   {
+    m_protocol.add_encoding (rfb::RAW, &m_raw_pixel_data);
     m_encodings.push_back (rfb::RAW);
-    m_encodings.push_back (rfb::COPY_RECT);
-    m_encodings.push_back (rfb::RRE);
-    m_encodings.push_back (rfb::HEXTILE);
-    m_encodings.push_back (rfb::ZRLE);
+    // m_encodings.push_back (rfb::COPY_RECT);
+    // m_encodings.push_back (rfb::RRE);
+    // m_encodings.push_back (rfb::HEXTILE);
+    // m_encodings.push_back (rfb::ZRLE);
 
     // Open connection with the X server.
     m_display = XOpenDisplay (NULL);
@@ -180,160 +412,83 @@ public:
 
 private:
   void schedule () const {
-    if (send_protocol_version_precondition ()) {
-      ioa::schedule (&x_rfb_client_automaton::send_protocol_version);
-    }
-    if (send_security_type_precondition ()) {
-      ioa::schedule (&x_rfb_client_automaton::send_security_type);
-    }
-    if (send_client_init_precondition ()) {
-      ioa::schedule (&x_rfb_client_automaton::send_client_init);
-    }
-    if (send_set_pixel_format_precondition ()) {
-      ioa::schedule (&x_rfb_client_automaton::send_set_pixel_format);
-    }
-    if (send_set_encodings_precondition ()) {
-      ioa::schedule (&x_rfb_client_automaton::send_set_encodings);
-    }
-    if (send_framebuffer_update_request_precondition ()) {
-      ioa::schedule (&x_rfb_client_automaton::send_framebuffer_update_request);
-    }
     if (send_precondition ()) {
       ioa::schedule (&x_rfb_client_automaton::send);
     }
-    if (recv_ignore_precondition ()) {
-      ioa::schedule (&x_rfb_client_automaton::recv_ignore);
-    }
-    if (recv_protocol_version_precondition ()) {
-      ioa::schedule (&x_rfb_client_automaton::recv_protocol_version);
-    }
-    if (recv_security_types_precondition ()) {
-      ioa::schedule (&x_rfb_client_automaton::recv_security_types);
-    }
-    if (recv_security_type_precondition ()) {
-      ioa::schedule (&x_rfb_client_automaton::recv_security_type);
-    }
-    if (recv_security_result_precondition ()) {
-      ioa::schedule (&x_rfb_client_automaton::recv_security_result);
-    }
-    if (recv_server_init_precondition ()) {
-      ioa::schedule (&x_rfb_client_automaton::recv_server_init);
-    }
-    if (recv_framebuffer_update_precondition ()) {
-      ioa::schedule (&x_rfb_client_automaton::recv_framebuffer_update);
-    }
-    if (recv_unknown_message_precondition ()) {
-      ioa::schedule (&x_rfb_client_automaton::recv_unknown_message);
-    }
-
-    bool some_recv = m_recv_protocol_version || m_recv_security_types || m_recv_security_type || m_recv_security_result || m_recv_server_init || m_recv_framebuffer_update || m_recv_unknown_message;
-
-    assert ((m_recv_ignore && !some_recv) || (!m_recv_ignore) && some_recv);
-
     if (schedule_read_precondition ()) {
       ioa::schedule (&x_rfb_client_automaton::schedule_read);
     }
   }
 
 private:
-  // Send the ProtocolVersion message.
-  bool send_protocol_version_precondition () const {
-    return m_send_protocol_version;
+
+  void recv_protocol_version (const rfb::protocol_version_t& version) {
+    std::cout << "client: " << __func__ << std::endl;
+
+    if (version == rfb::PROTOCOL_VERSION_3_3) {
+      // The server send us a version we can understand.
+      // Use the lowest version mutually supported.
+      m_protocol_version = std::min (version, HIGHEST_VERSION);
+    }
+    else {
+      // The version is either too high, too low, or garbage.
+      // Use our own and let the server disconnect if not supported.
+      m_protocol_version = HIGHEST_VERSION;
+    }
+
+    send_protocol_version ();
   }
 
-  void send_protocol_version_effect () {
+  void send_protocol_version () {
     std::cout << "client: " << __func__ << std::endl;
     ioa::buffer* buf = new ioa::buffer ();
     m_protocol_version.write_to_buffer (*buf);
     m_sendq.push (ioa::const_shared_ptr<ioa::buffer_interface> (buf));
-    m_send_protocol_version = false;
-    m_recv_ignore = false;
-    if (m_protocol_version >= rfb::PROTOCOL_VERSION_3_7) {
-      m_recv_security_types = true;
-    }
-    else {
-      m_recv_security_type = true;
-    }
   }
 
-  UP_INTERNAL (x_rfb_client_automaton, send_protocol_version);
-
-  // Send the SecurityType message.
-  bool send_security_type_precondition () const {
-    return m_send_security_type;
-  }
-
-  void send_security_type_effect () {
+  void recv_security_type (const rfb::security_type_t& msg) {
     std::cout << "client: " << __func__ << std::endl;
-    ioa::buffer* buf = new ioa::buffer ();
-    rfb::security_type_t msg (m_security);
-    msg.write_to_buffer (*buf);
-    m_sendq.push (ioa::const_shared_ptr<ioa::buffer_interface> (buf));
-    m_send_security_type = false;
-    m_recv_ignore = false;
-    m_recv_security_result = true;
+    assert (msg.security == rfb::NONE);
+
+    send_client_init ();
   }
-
-  UP_INTERNAL (x_rfb_client_automaton, send_security_type);
-
-  // Send the ClientInit message.
-  bool send_client_init_precondition () const {
-    return m_send_client_init;
-  }
-
-  void send_client_init_effect () {
+  
+  void send_client_init () {
     std::cout << "client: " << __func__ << std::endl;
     ioa::buffer* buf = new ioa::buffer ();
     rfb::client_init_t msg (true);
     msg.write_to_buffer (*buf);
     m_sendq.push (ioa::const_shared_ptr<ioa::buffer_interface> (buf));
-    m_send_client_init = false;
-    m_recv_ignore = false;
-    m_recv_server_init = true;
   }
 
-  UP_INTERNAL (x_rfb_client_automaton, send_client_init);
+  void recv_server_init (const rfb::server_init_t& msg) {
+    std::cout << "client: " << __func__ << std::endl;
+    m_server_width = std::min (WIDTH, msg.framebuffer_width);
+    m_server_height = std::min (HEIGHT, msg.framebuffer_height);
+    // We are going to ignore the server pixel format and send our own.
 
-  // Send the SetPixelFormat message.
-  bool send_set_pixel_format_precondition () const {
-    return m_send_set_pixel_format;
+    send_set_pixel_format ();
+    send_set_encodings ();
+    send_framebuffer_update_request ();
   }
 
-  void send_set_pixel_format_effect () {
+  void send_set_pixel_format () {
     std::cout << "client: " << __func__ << std::endl;
     ioa::buffer* buf = new ioa::buffer ();
     rfb::set_pixel_format_t msg (m_pixel_format);
     msg.write_to_buffer (*buf);
     m_sendq.push (ioa::const_shared_ptr<ioa::buffer_interface> (buf));
-    m_send_set_pixel_format = false;
-    m_send_set_encodings = true;
   }
 
-  UP_INTERNAL (x_rfb_client_automaton, send_set_pixel_format);
-
-  // Send the SetEncodings message.
-  bool send_set_encodings_precondition () const {
-    return m_send_set_encodings;
-  }
-
-  void send_set_encodings_effect () {
+  void send_set_encodings () {
     std::cout << "client: " << __func__ << std::endl;
     ioa::buffer* buf = new ioa::buffer ();
     rfb::set_encodings_t msg (m_encodings);
     msg.write_to_buffer (*buf);
     m_sendq.push (ioa::const_shared_ptr<ioa::buffer_interface> (buf));
-    m_send_set_encodings = false;
-    m_send_framebuffer_update_request = true;
   }
 
-  UP_INTERNAL (x_rfb_client_automaton, send_set_encodings);
-
-  // Send the FramebufferUpdateRequest message.
-  bool send_framebuffer_update_request_precondition () const {
-    return m_send_framebuffer_update_request;
-  }
-
-  void send_framebuffer_update_request_effect () {
+  void send_framebuffer_update_request () {
     std::cout << "client: " << __func__ << std::endl;
     ioa::buffer* buf = new ioa::buffer ();
     // We want the whole image.
@@ -342,13 +497,28 @@ private:
     m_incremental = true;
     msg.write_to_buffer (*buf);
     m_sendq.push (ioa::const_shared_ptr<ioa::buffer_interface> (buf));
-    m_send_framebuffer_update_request = false;
-    m_recv_ignore = false;
-    m_recv_framebuffer_update = true;
-    m_recv_unknown_message = true;
   }
 
-  UP_INTERNAL (x_rfb_client_automaton, send_framebuffer_update_request);
+  void recv_framebuffer_update () {
+    std::cout << "client: " << __func__ << std::endl;
+
+    ioa::time now = ioa::time::now ();
+    std::cout << "@(" << now.sec () << "," << now.usec () << ")" << std::endl;
+
+    // Show the image.
+    // TODO:  Only show the part that changed.
+    XPutImage (m_display,
+    	       m_window,
+    	       DefaultGC (m_display, m_screen),
+    	       m_image,
+    	       0, 0,
+    	       0, 0,
+    	       WIDTH, HEIGHT);
+    XFlush (m_display);
+
+    // Request.
+    send_framebuffer_update_request ();
+  }
 
   // Send a message.
   bool send_precondition () const {
@@ -365,190 +535,11 @@ public:
   V_UP_OUTPUT (x_rfb_client_automaton, send, ioa::const_shared_ptr<ioa::buffer_interface>);
 
 private:
-  // Ignore received bytes.
-  bool recv_ignore_precondition () const {
-    return m_recv_ignore && !m_buffer.empty ();
-  }
-
-  void recv_ignore_effect () {
-    std::cerr << "client: ignoring " << m_buffer.size () << " bytes" << std::endl;
-    m_buffer.clear ();
-  }
-
-  UP_INTERNAL (x_rfb_client_automaton, recv_ignore);
-
-  // Receive the ProtocolVersion message.
-  bool recv_protocol_version_precondition () const {
-    return m_recv_protocol_version && rfb::protocol_version_t::could_read_from_buffer (m_buffer);
-  }
-
-  void recv_protocol_version_effect () {
-    std::cout << "client: " << __func__ << std::endl;
-    rfb::protocol_version_t msg;
-    msg.read_from_buffer (m_buffer);
-
-    if ((msg == rfb::PROTOCOL_VERSION_3_3) ||
-    	(msg == rfb::PROTOCOL_VERSION_3_7) ||
-    	(msg == rfb::PROTOCOL_VERSION_3_8)) {
-      // The server send us a version we can understand.
-      // Use the lowest version mutually supported.
-      m_protocol_version = std::min (msg, HIGHEST_VERSION);
-    }
-    else {
-      // The version is either too high, too low, or garbage.
-      // Use our own and let the server disconnect if not supported.
-      m_protocol_version = HIGHEST_VERSION;
-    }
-
-    m_recv_protocol_version = false;
-    m_recv_ignore = true;
-    m_send_protocol_version = true;
-  }
-
-  UP_INTERNAL (x_rfb_client_automaton, recv_protocol_version);
-
-  // Receive the SecurityTypes message.
-  bool recv_security_types_precondition () const {
-    return m_recv_security_types && rfb::security_types_t::could_read_from_buffer (m_buffer);
-  }
-  
-  void recv_security_types_effect () {
-    std::cout << "client: " << __func__ << std::endl;
-    rfb::security_types_t msg;
-    msg.read_from_buffer (m_buffer);
-
-    m_recv_security_types = false;
-
-    if (msg.security_types.size () == 0) {
-      // Connection failed.
-      // TODO
-      assert (false);
-    }
-    else {
-      m_security = rfb::INVALID;
-      if (msg.security_types.count (rfb::NONE) != 0) {
-	// Found an acceptable security type.
-	m_security = rfb::NONE;
-      }
-
-      m_recv_ignore = true;
-      m_send_security_type = true;
-    }
-  }
-
-  UP_INTERNAL (x_rfb_client_automaton, recv_security_types);
-  
-  // Receive the SecurityType message.
-  bool recv_security_type_precondition () const {
-    return m_recv_security_type && rfb::security_type_t::could_read_from_buffer (m_buffer);
-  }
-
-  void recv_security_type_effect () {
-    std::cout << "client: " << __func__ << std::endl;
-    rfb::security_type_t msg;
-    msg.read_from_buffer (m_buffer);
-
-    m_recv_security_type = false;
-
-    if (msg.security == rfb::NONE) {
-      m_recv_ignore = true;
-      m_send_client_init = true;
-    }
-    else {
-      // TODO
-      assert (false);
-    }
-  }
-
-  UP_INTERNAL (x_rfb_client_automaton, recv_security_type);
-
-  // Receive the SecurityResult message.
-  bool recv_security_result_precondition () const {
-    return m_recv_security_result && rfb::security_result_t::could_read_from_buffer (m_buffer);
-  }
-  
-  void recv_security_result_effect () {
-    std::cout << "client: " << __func__ << std::endl;
-    rfb::security_result_t msg;
-    msg.read_from_buffer (m_buffer);
-
-    m_recv_security_result = false;
-
-    if (msg.status == 0) {
-      // Success.
-      m_send_client_init = true;
-      m_recv_ignore = true;
-    }
-    else {
-      // Failure.
-      // TODO
-      assert (false);
-    }
-  }
-  
-  UP_INTERNAL (x_rfb_client_automaton, recv_security_result);
-
-  // Receive the ServerInit message.
-  bool recv_server_init_precondition () const {
-    return m_recv_server_init && rfb::server_init_t::could_read_from_buffer (m_buffer);
-  }
-
-  void recv_server_init_effect () {
-    std::cout << "client: " << __func__ << std::endl;
-    rfb::server_init_t msg;
-    msg.read_from_buffer (m_buffer);
-    m_server_width = std::min (WIDTH, msg.framebuffer_width);
-    m_server_height = std::min (HEIGHT, msg.framebuffer_height);
-    // We are going to ignore the server pixel format and send our own.
-    m_recv_server_init = false;
-    m_recv_ignore = true;
-    m_send_set_pixel_format = true;
-  }
-
-  UP_INTERNAL (x_rfb_client_automaton, recv_server_init);
-
-  // Receive the FramebufferUpdate message.
-  bool recv_framebuffer_update_precondition () const {
-    return m_recv_framebuffer_update && rfb::framebuffer_update_t::could_read_from_buffer (m_buffer, m_pixel_format);
-  }
-
-  void recv_framebuffer_update_effect () {
-    std::cout << "client: " << __func__ << std::endl;
-    rfb::framebuffer_update_t msg;
-    msg.read_from_buffer (m_buffer, m_pixel_format, m_data, WIDTH, HEIGHT);
-
-    // Show the image.
-    // TODO:  Only show the part that changed.
-    XPutImage (m_display,
-	       m_window,
-	       DefaultGC (m_display, m_screen),
-	       m_image,
-	       0, 0,
-	       0, 0,
-	       WIDTH, HEIGHT);
-    XFlush (m_display);
-
-    // Send a new request.
-    m_send_framebuffer_update_request = true;
-  }
-
-  UP_INTERNAL (x_rfb_client_automaton, recv_framebuffer_update);
-
-  // Receive an unknown message.
-  bool recv_unknown_message_precondition () const {
-    return false;
-  }
-
-  void recv_unknown_message_effect () {
-    // TODO
-    assert (false);
-  }
-
-  UP_INTERNAL (x_rfb_client_automaton, recv_unknown_message);
 
   void receive_effect (const ioa::const_shared_ptr<ioa::buffer_interface>& val) {
     if (val.get () != 0) {
-      m_buffer.append (*val.get ());
+      rgram::buffer rbuf (*val.get ());
+      m_protocol.put (rbuf);
     }
   }
 

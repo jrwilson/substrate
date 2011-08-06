@@ -12,8 +12,7 @@
 #include <ioa/shared_ptr.hpp>
 
 #include <iostream>
-// TODO: Make buffer processing much more efficient.
-// Appends and more importantly consumes should be minimized.
+// TODO:  Clean up this file.
 
 namespace rfb {
   
@@ -57,74 +56,41 @@ namespace rfb {
       return compare (other) >= 0;
     }
 
-    static bool could_read_from_buffer (const ioa::buffer& buf) {
-      return buf.size () >= PROTOCOL_VERSION_STRING_LENGTH;
-    }
-
-    void read_from_buffer (ioa::buffer& buf) {
-      memcpy (version, buf.data (), PROTOCOL_VERSION_STRING_LENGTH);
-      buf.consume (PROTOCOL_VERSION_STRING_LENGTH);
-    }
-
     void write_to_buffer (ioa::buffer& buf) const {
       buf.append (version, PROTOCOL_VERSION_STRING_LENGTH);
     }
   };
 
+  struct protocol_version_gramel :
+    public rgram::gramel
+  {
+    rgram::fixed_array_gramel<rgram::char_gramel, rfb::PROTOCOL_VERSION_STRING_LENGTH> m_version_array;
+
+    void put (rgram::buffer& buf) {
+      assert (!done ());
+      m_version_array.put (buf);
+    }
+
+    bool done () const {
+      return m_version_array.done ();
+    }
+
+    void reset () {
+      m_version_array.reset ();
+    }
+    
+    protocol_version_t get () const {
+      return protocol_version_t (m_version_array.get ());
+    }
+  };
+
   const protocol_version_t PROTOCOL_VERSION_3_3 ("RFB 003.003\n");
-  const protocol_version_t PROTOCOL_VERSION_3_7 ("RFB 003.007\n");
-  const protocol_version_t PROTOCOL_VERSION_3_8 ("RFB 003.008\n");
 
   enum security_t {
     INVALID,
     NONE,
   };
   
-  struct security_types_t
-  {
-    std::set<security_t> security_types;
-
-    security_types_t () { }
-
-    security_types_t (const std::set<security_t>& types) :
-      security_types (types)
-    { }
-
-    static bool could_read_from_buffer (const ioa::buffer& buf) {
-      if (buf.size () >= sizeof (uint8_t)) {
-	const uint8_t* number_of_security_types = static_cast<const uint8_t*> (buf.data ());
-	return buf.size () >= (*number_of_security_types + sizeof (uint8_t));
-      }
-      else {
-	return false;
-      }
-    }
-
-    void read_from_buffer (ioa::buffer& buf) {
-      const uint8_t* data = static_cast<const uint8_t*> (buf.data ());
-      const uint8_t number_of_security_types = *data;
-      ++data;
-      for (uint8_t i = 0; i < number_of_security_types; ++i) {
-	security_types.insert (static_cast<security_t> (*data));
-	++data;
-      }
-      buf.consume (number_of_security_types + sizeof (uint8_t));
-    }
-
-    void write_to_buffer (ioa::buffer& buf) const {
-      uint8_t x;
-
-      x = security_types.size ();
-      buf.append (&x, sizeof (x));
-      for (std::set<security_t>::const_iterator pos = security_types.begin ();
-	   pos != security_types.end ();
-	   ++pos) {
-	x = *pos;
-	buf.append (&x, sizeof (x));
-      }
-    }
-  };
-
   struct security_type_t
   {
     security_t security;
@@ -137,47 +103,33 @@ namespace rfb {
       security (s)
     { }
 
-    static bool could_read_from_buffer (const ioa::buffer& buf) {
-      return buf.size () >= sizeof (uint8_t);
-    }
-
-    void read_from_buffer (ioa::buffer& buf) {
-      uint8_t x;
-      memcpy (&x, buf.data (), sizeof (x));
-      security = static_cast<security_t> (x);
-      buf.consume (sizeof (x));
-    }
-
     void write_to_buffer (ioa::buffer& buf) const {
-      uint8_t x = security;
+      uint32_t x = htonl (security);
       buf.append (&x, sizeof (x));
     }
 
   };
 
-  struct security_result_t
+  struct security_type_gramel :
+    public rgram::gramel
   {
-    uint32_t status;
+    rgram::uint32_gramel m_security_type;
 
-    security_result_t () { }
-
-    security_result_t (const bool success) {
-      status = success ? 0 : 1;
+    void put (rgram::buffer& buf) {
+      assert (!done ());
+      m_security_type.put (buf);
     }
 
-    static bool could_read_from_buffer (const ioa::buffer& buf) {
-      return buf.size () >= sizeof (uint32_t);
+    bool done () const {
+      return m_security_type.done ();
     }
 
-    void read_from_buffer (ioa::buffer& buf) {
-      memcpy (&status, buf.data (), sizeof (status));
-      status = ntohl (status);
-      buf.consume (sizeof (status));
+    void reset () {
+      m_security_type.reset ();
     }
 
-    void write_to_buffer (ioa::buffer& buf) const {
-      uint32_t x = htonl (status);
-      buf.append (&x, sizeof (x));
+    security_type_t get () const {
+      return security_type_t (security_t (m_security_type.get ()));
     }
   };
 
@@ -191,18 +143,33 @@ namespace rfb {
       shared_flag (flag)
     { }
 
-    static bool could_read_from_buffer (const ioa::buffer& buf) {
-      return buf.size () >= sizeof (uint8_t);
-    }
-
-    void read_from_buffer (ioa::buffer& buf) {
-      memcpy (&shared_flag, buf.data (), sizeof (shared_flag));
-      buf.consume (sizeof (shared_flag));
-    }
-
     void write_to_buffer (ioa::buffer& buf) const {
       buf.append (&shared_flag, sizeof (shared_flag));
     }
+  };
+
+  struct client_init_gramel :
+    public rgram::gramel
+  {
+    rgram::uint8_gramel m_init;
+
+    void put (rgram::buffer& buf) {
+      assert (!done ());
+      m_init.put (buf);
+    }
+
+    bool done () const {
+      return m_init.done ();
+    }
+
+    void reset () {
+      m_init.reset ();
+    }
+
+    client_init_t get () const {
+      return client_init_t (m_init.get ());
+    }
+
   };
 
   struct pixel_format_t {
@@ -216,6 +183,7 @@ namespace rfb {
     uint8_t red_shift;
     uint8_t green_shift;
     uint8_t blue_shift;
+    uint8_t padding[3];
 
     pixel_format_t () { }
 
@@ -256,38 +224,66 @@ namespace rfb {
       buf.append (&red_shift, sizeof (red_shift));
       buf.append (&green_shift, sizeof (green_shift));
       buf.append (&blue_shift, sizeof (blue_shift));
-      // Three bytes of padding.
-      buf.resize (buf.size () + 3);
+      buf.append (padding, sizeof (padding));
     }
 
-    void read_from_buffer (ioa::buffer& buf) {
-      memcpy (&bits_per_pixel, buf.data (), sizeof (bits_per_pixel));
-      buf.consume (sizeof (bits_per_pixel));
-      memcpy (&depth, buf.data (), sizeof (depth));
-      buf.consume (sizeof (depth));
-      memcpy (&big_endian_flag, buf.data (), sizeof (big_endian_flag));
-      buf.consume (sizeof (big_endian_flag));
-      memcpy (&true_colour_flag, buf.data (), sizeof (true_colour_flag));
-      buf.consume (sizeof (true_colour_flag));
-      memcpy (&red_max, buf.data (), sizeof (red_max));
-      red_max = ntohs (red_max);
-      buf.consume (sizeof (red_max));
-      memcpy (&green_max, buf.data (), sizeof (green_max));
-      green_max = ntohs (green_max);
-      buf.consume (sizeof (green_max));
-      memcpy (&blue_max, buf.data (), sizeof (blue_max));
-      blue_max = ntohs (blue_max);
-      buf.consume (sizeof (blue_max));
-      memcpy (&red_shift, buf.data (), sizeof (red_shift));
-      buf.consume (sizeof (red_shift));
-      memcpy (&green_shift, buf.data (), sizeof (green_shift));
-      buf.consume (sizeof (green_shift));
-      memcpy (&blue_shift, buf.data (), sizeof (blue_shift));
-      buf.consume (sizeof (blue_shift));
-      // Three bytes of padding.
-      buf.consume (3);
+  };
+
+  struct pixel_format_gramel :
+    public rgram::gramel
+  {
+    rgram::uint8_gramel m_bits_per_pixel;
+    rgram::uint8_gramel m_depth;
+    rgram::uint8_gramel m_big_endian_flag;
+    rgram::uint8_gramel m_true_colour_flag;
+    rgram::uint16_gramel m_red_max;
+    rgram::uint16_gramel m_green_max;
+    rgram::uint16_gramel m_blue_max;
+    rgram::uint8_gramel m_red_shift;
+    rgram::uint8_gramel m_green_shift;
+    rgram::uint8_gramel m_blue_shift;
+    rgram::fixed_array_gramel<rgram::char_gramel, 3> m_padding;
+    rgram::sequence_gramel m_sequence;
+
+    pixel_format_gramel () {
+      m_sequence.append (&m_bits_per_pixel);
+      m_sequence.append (&m_depth);
+      m_sequence.append (&m_big_endian_flag);
+      m_sequence.append (&m_true_colour_flag);
+      m_sequence.append (&m_red_max);
+      m_sequence.append (&m_green_max);
+      m_sequence.append (&m_blue_max);
+      m_sequence.append (&m_red_shift);
+      m_sequence.append (&m_green_shift);
+      m_sequence.append (&m_blue_shift);
+      m_sequence.append (&m_padding);
     }
 
+    void put (rgram::buffer& buf) {
+      assert (!done ());
+      m_sequence.put (buf);
+    }
+
+    bool done () const {
+      return m_sequence.done ();
+    }
+
+    void reset () {
+      m_sequence.reset ();
+    }
+
+    pixel_format_t get () const {
+      return pixel_format_t (m_bits_per_pixel.get (),
+			     m_depth.get (),
+			     m_big_endian_flag.get (),
+			     m_true_colour_flag.get (),
+			     m_red_max.get (),
+			     m_green_max.get (),
+			     m_blue_max.get (),
+			     m_red_shift.get (),
+			     m_green_shift.get (),
+			     m_blue_shift.get ());
+    }
   };
 
   struct server_init_t {
@@ -308,35 +304,6 @@ namespace rfb {
       name (n)
     { }
 
-    static bool could_read_from_buffer (const ioa::buffer& buf) {
-      if (buf.size () >= 24) {
-	const uint32_t* ptr = static_cast<const uint32_t*> (buf.data ());
-	// Advance to name length.
-	ptr += 5;
-	const uint32_t name_len = ntohl (*ptr);
-	return buf.size () >= (24 + name_len);
-      }
-      else {
-	return false;
-      }
-    }
-
-    void read_from_buffer (ioa::buffer& buf) {
-      memcpy (&framebuffer_width, buf.data (), sizeof (framebuffer_width));
-      framebuffer_width = ntohs (framebuffer_width);
-      buf.consume (sizeof (framebuffer_width));
-      memcpy (&framebuffer_height, buf.data (), sizeof (framebuffer_height));
-      framebuffer_height = ntohs (framebuffer_height);
-      buf.consume (sizeof (framebuffer_height));
-      server_pixel_format.read_from_buffer (buf);
-      uint32_t name_len;
-      memcpy (&name_len, buf.data (), sizeof (name_len));
-      name_len = ntohl (name_len);
-      buf.consume (sizeof (name_len));
-      name = std::string (static_cast<const char*> (buf.data ()), name_len);
-      buf.consume (name_len);
-    }
-
     void write_to_buffer (ioa::buffer& buf) const {
       uint16_t x;
       x = htons (framebuffer_width);
@@ -351,40 +318,103 @@ namespace rfb {
     }
   };
 
+  struct server_init_gramel :
+    public rgram::gramel
+  {
+    rgram::uint16_gramel m_width;
+    rgram::uint16_gramel m_height;
+    pixel_format_gramel m_pixel_format;
+    rgram::uint32_gramel m_name_length;
+    rgram::sequence_gramel m_sequence;
+    rgram::dynamic_array_gramel<rgram::char_gramel> m_name_string;
+
+    server_init_gramel () {
+      m_sequence.append (&m_width);
+      m_sequence.append (&m_height);
+      m_sequence.append (&m_pixel_format);
+      m_sequence.append (&m_name_length);
+    }
+
+    void put (rgram::buffer& buf) {
+      assert (!done ());
+      if (!m_sequence.done ()) {
+	m_sequence.put (buf);
+      }
+      if (m_sequence.done ()) {
+	m_name_string.set_size (m_name_length.get ());
+	m_name_string.put (buf);
+      }
+    }
+
+    bool done () const {
+      return m_name_string.done ();
+    }
+
+    void reset () {
+      m_sequence.reset ();
+      m_name_string.reset ();
+    }
+
+    server_init_t get () const {
+      std::string s (m_name_string.get ().begin (), m_name_string.get ().end ());
+      return server_init_t (m_width.get (),
+			    m_height.get (),
+			    m_pixel_format.get (),
+			    s);
+    }
+  };
+
+  const uint8_t SET_PIXEL_FORMAT_TYPE = 0;
+
   struct set_pixel_format_t {
-    uint8_t message_type;
+    uint8_t padding[3];
     pixel_format_t pixel_format;
 
     set_pixel_format_t () { }
 
     set_pixel_format_t (const pixel_format_t& format) :
-      message_type (0),
       pixel_format (format)
     { }
 
-    static bool could_read_from_buffer (const ioa::buffer& buf) {
-      if (buf.size () >= 20) {
-	const uint8_t* ptr = static_cast<const uint8_t*> (buf.data ());
-	return *ptr == 0;
-      }
-      else {
-	return false;
-      }
-    }
-
-    void read_from_buffer (ioa::buffer& buf) {
-      message_type = 0;
-      buf.consume (4);
-      pixel_format.read_from_buffer (buf);
-    }
-
     void write_to_buffer (ioa::buffer& buf) const {
-      buf.append (&message_type, sizeof (message_type));
+      buf.append (&SET_PIXEL_FORMAT_TYPE, sizeof (SET_PIXEL_FORMAT_TYPE));
       // Padding.
       buf.resize (buf.size () + 3);
       pixel_format.write_to_buffer (buf);
     }
   };
+
+  struct set_pixel_format_gramel :
+    public rgram::gramel
+  {
+    rgram::fixed_array_gramel<rgram::uint8_gramel, 3> m_padding;
+    pixel_format_gramel m_pixel_format;
+    rgram::sequence_gramel m_sequence;
+
+    set_pixel_format_gramel () {
+      m_sequence.append (&m_padding);
+      m_sequence.append (&m_pixel_format);
+    }
+    
+    void put (rgram::buffer& buf) {
+      assert (!done ());
+      m_sequence.put (buf);
+    }
+
+    bool done () const {
+      return m_sequence.done ();
+    }
+
+    void reset () {
+      m_sequence.reset ();
+    }
+
+    set_pixel_format_t get () const {
+      return set_pixel_format_t (m_pixel_format.get ());
+    }
+  };
+
+  const uint8_t SET_ENCODINGS_TYPE = 2;
 
   const int32_t RAW = 0;
   const int32_t COPY_RECT = 1;
@@ -393,49 +423,19 @@ namespace rfb {
   const int32_t ZRLE = 16;
 
   struct set_encodings_t {
-    uint8_t message_type;
+    uint8_t padding;
+    uint16_t number_of_encodings;
     std::vector<int32_t> encodings;
 
     set_encodings_t () { }
 
     set_encodings_t (const std::vector<int32_t>& enc) :
-      message_type (2),
+      number_of_encodings (enc.size ()),
       encodings (enc)
     { }
 
-    static bool could_read_from_buffer (const ioa::buffer& buf) {
-      if (buf.size () >= 4) {
-	const uint8_t* ptr = static_cast<const uint8_t*> (buf.data ());
-	if (*ptr == 2) {
-	  const uint16_t* p = static_cast<const uint16_t*> (buf.data ());
-	  ++p;
-	  return buf.size () >= (4u + ntohs (*p));
-	}
-	else {
-	  return false;
-	}
-      }
-      else {
-	return false;
-      }
-    }
-
-    void read_from_buffer (ioa::buffer& buf) {
-      message_type = 2;
-      buf.consume (2);
-      uint16_t number_of_encodings = ntohs (*static_cast<uint16_t *> (buf.data ()));
-      buf.consume (2);
-      int32_t* data = static_cast<int32_t*> (buf.data ());
-      for (uint16_t i = 0; i < number_of_encodings; ++i) {
-	encodings.push_back (ntohl (*data));
-	++data;
-      }
-      
-      buf.consume (number_of_encodings * sizeof (int32_t));
-    }
-
     void write_to_buffer (ioa::buffer& buf) const {
-      buf.append (&message_type, sizeof (message_type));
+      buf.append (&SET_ENCODINGS_TYPE, sizeof (SET_ENCODINGS_TYPE));
       // Padding.
       buf.resize (buf.size () + 1);
       uint16_t number_of_encodings = htons (encodings.size ());
@@ -449,9 +449,49 @@ namespace rfb {
     }
   };
 
+  struct set_encodings_gramel :
+    public rgram::gramel
+  {
+    rgram::uint8_gramel m_padding;
+    rgram::uint16_gramel m_number_of_encodings;
+    rgram::sequence_gramel m_sequence;
+    rgram::dynamic_array_gramel<rgram::int32_gramel> m_encoding_types;
+
+    set_encodings_gramel () {
+      m_sequence.append (&m_padding);
+      m_sequence.append (&m_number_of_encodings);
+    }
+
+    void put (rgram::buffer& buf) {
+      assert (!done ());
+      if (!m_sequence.done ()) {
+	m_sequence.put (buf);
+      }
+      if (m_sequence.done ()) {
+	m_encoding_types.set_size (m_number_of_encodings.get ());
+	m_encoding_types.put (buf);
+      }
+    }
+
+    bool done () const {
+      return m_encoding_types.done ();
+    }
+
+    void reset () {
+      m_sequence.reset ();
+      m_encoding_types.reset ();
+    }
+
+    set_encodings_t get () const {
+      return set_encodings_t (m_encoding_types.get ());
+    }
+    
+  };
+
+  const uint8_t FRAMEBUFFER_UPDATE_REQUEST_TYPE = 3;
+
   struct framebuffer_update_request_t
   {
-    uint8_t message_type;
     uint8_t incremental;
     uint16_t x_position;
     uint16_t y_position;
@@ -465,7 +505,6 @@ namespace rfb {
 				  const uint16_t ypos,
 				  const uint16_t w,
 				  const uint16_t h) :
-      message_type (3),
       incremental (incr),
       x_position (xpos),
       y_position (ypos),
@@ -473,37 +512,8 @@ namespace rfb {
       height (h)
     { }
 
-    static bool could_read_from_buffer (const ioa::buffer& buf) {
-      if (buf.size () >= 10) {
-	const uint8_t* ptr = static_cast<const uint8_t*> (buf.data ());
-	return *ptr == 3;
-      }
-      else {
-	return false;
-      }
-    }
-
-    void read_from_buffer (ioa::buffer& buf) {
-      memcpy (&message_type, buf.data (), sizeof (message_type));
-      buf.consume (sizeof (message_type));
-      memcpy (&incremental, buf.data (), sizeof (incremental));
-      buf.consume (sizeof (incremental));
-      memcpy (&x_position, buf.data (), sizeof (x_position));
-      x_position = ntohs (x_position);
-      buf.consume (sizeof (x_position));
-      memcpy (&y_position, buf.data (), sizeof (y_position));
-      y_position = ntohs (y_position);
-      buf.consume (sizeof (y_position));
-      memcpy (&width, buf.data (), sizeof (width));
-      width = ntohs (width);
-      buf.consume (sizeof (width));
-      memcpy (&height, buf.data (), sizeof (height));
-      height = ntohs (height);
-      buf.consume (sizeof (height));
-    }
-
     void write_to_buffer (ioa::buffer& buf) const {
-      buf.append (&message_type, sizeof (message_type));
+      buf.append (&FRAMEBUFFER_UPDATE_REQUEST_TYPE, sizeof (FRAMEBUFFER_UPDATE_REQUEST_TYPE));
       buf.append (&incremental, sizeof (incremental));
       uint16_t x;
       x = htons (x_position);
@@ -517,32 +527,148 @@ namespace rfb {
     }
   };
 
+  struct framebuffer_update_request_gramel :
+    public rgram::gramel
+  {
+    rgram::uint8_gramel m_incremental;
+    rgram::uint16_gramel m_x_position;
+    rgram::uint16_gramel m_y_position;
+    rgram::uint16_gramel m_width;
+    rgram::uint16_gramel m_height;
+    rgram::sequence_gramel m_sequence;
+
+    framebuffer_update_request_gramel () {
+      m_sequence.append (&m_incremental);
+      m_sequence.append (&m_x_position);
+      m_sequence.append (&m_y_position);
+      m_sequence.append (&m_width);
+      m_sequence.append (&m_height);
+    }
+    
+    void put (rgram::buffer& buf) {
+      assert (!done ());
+      m_sequence.put (buf);
+    }
+
+    bool done () const {
+      return m_sequence.done ();
+    }
+
+    void reset () {
+      m_sequence.reset ();
+    }
+
+    framebuffer_update_request_t get () const {
+      return framebuffer_update_request_t (m_incremental.get (),
+					   m_x_position.get (),
+					   m_y_position.get (),
+					   m_width.get (),
+					   m_height.get ());
+    }
+  };
+
+  struct client_message_gramel :
+    public rgram::gramel
+  {
+    set_pixel_format_gramel m_set_pixel_format;
+    set_encodings_gramel m_set_encodings;
+    framebuffer_update_request_gramel m_framebuffer_update_request;
+    rgram::choice_gramel<rgram::uint8_gramel> m_choice;
+
+    client_message_gramel () {
+      m_choice.choices.insert (std::make_pair (SET_PIXEL_FORMAT_TYPE, &m_set_pixel_format));
+      m_choice.choices.insert (std::make_pair (SET_ENCODINGS_TYPE, &m_set_encodings));
+      m_choice.choices.insert (std::make_pair (FRAMEBUFFER_UPDATE_REQUEST_TYPE, &m_framebuffer_update_request));
+    }
+
+    void put (rgram::buffer& buf) {
+      assert (!done ());
+      m_choice.put (buf);
+    }
+
+    bool done () const {
+      return m_choice.done ();
+    }
+
+    void reset () {
+      m_choice.reset ();
+    }
+  };
+
+  const uint8_t FRAMEBUFFER_UPDATE_TYPE = 0;
+
+  struct pixel_data_t {
+    virtual ~pixel_data_t () { }
+    virtual void write_to_buffer (ioa::buffer& buf) const = 0;
+  };
+
+  struct pixel_data_gramel :
+    public rgram::gramel
+  {
+    virtual ~pixel_data_gramel () { }
+    virtual void set_dimensions (const uint16_t xpos,
+				 const uint16_t ypos,
+				 const uint16_t w,
+				 const uint16_t h) = 0;
+  };
+
+  struct encoding_choice_gramel :
+    public rgram::gramel
+  {
+    typedef rgram::choice_gramel<rgram::int32_gramel, pixel_data_gramel*> choice_type;
+    choice_type m_choice;
+
+    void put (rgram::buffer& buf) {
+      assert (!done ());
+      m_choice.put (buf);
+    }
+
+    bool done () const {
+      return m_choice.done ();
+    }
+
+    void reset () {
+      m_choice.reset ();
+    }
+
+    void add_encoding (const int32_t type,
+		       pixel_data_gramel* gramel) {
+      m_choice.choices.insert (std::make_pair (type, gramel));
+    }
+
+    void set_dimensions (const uint16_t xpos,
+			 const uint16_t ypos,
+			 const uint16_t w,
+			 const uint16_t h) {
+      for (choice_type::map_type::const_iterator pos = m_choice.choices.begin ();
+	   pos != m_choice.choices.end ();
+	   ++pos) {
+	pos->second->set_dimensions (xpos, ypos, w, h);
+      }
+    }
+  };
+
   struct rectangle_t
   {
     uint16_t x_position;
     uint16_t y_position;
     uint16_t width;
     uint16_t height;
-    int32_t encoding_type;
+    ioa::shared_ptr<pixel_data_t> data;
 
     rectangle_t (const uint16_t xpos,
-		 const uint16_t ypos,
-		 const uint16_t w,
-		 const uint16_t h) :
+  		 const uint16_t ypos,
+  		 const uint16_t w,
+  		 const uint16_t h,
+		 pixel_data_t* d) :
       x_position (xpos),
       y_position (ypos),
       width (w),
-      height (h)
+      height (h),
+      data (d)
     { }
 
-    virtual ~rectangle_t () { }
-
-    void write_to_buffer (ioa::buffer& buf,
-			  const pixel_format_t& server_format,
-			  const pixel_format_t& client_format,
-			  const void* source_data,
-			  const uint16_t source_width,
-			  const uint16_t source_height) const {
+    void write_to_buffer (ioa::buffer& buf) const {
       uint16_t x;
       x = htons (x_position);
       buf.append (&x, sizeof (x));
@@ -552,198 +678,201 @@ namespace rfb {
       buf.append (&x, sizeof (x));
       x = htons (height);
       buf.append (&x, sizeof (x));
-      int32_t y;
-      y = htonl (encoding_type);
-      buf.append (&y, sizeof (y));
-      write_to_buffer_dispatch (buf, server_format, client_format, source_data, source_width, source_height);
+      data->write_to_buffer (buf);
     }
 
-    virtual void write_to_buffer_dispatch (ioa::buffer& buf,
-					   const pixel_format_t& server_format,
-					   const pixel_format_t& client_format,
-					   const void* source_data,
-					   const uint16_t source_width,
-					   const uint16_t source_height) const = 0;
   };
-
-  struct raw_rectangle_t :
-    public rectangle_t
+  
+  struct rectangle_gramel :
+    public rgram::gramel
   {
-    raw_rectangle_t (const uint16_t xpos,
-		     const uint16_t ypos,
-		     const uint16_t w,
-		     const uint16_t h) :
-      rectangle_t (xpos, ypos, w, h)
+    typedef rectangle_t value_type;
+    rgram::uint16_gramel m_x_position;
+    rgram::uint16_gramel m_y_position;
+    rgram::uint16_gramel m_width;
+    rgram::uint16_gramel m_height;
+    rgram::sequence_gramel m_sequence;
+    encoding_choice_gramel m_encoding_choice;
+
+    rectangle_gramel ()
     {
-      encoding_type = RAW;
+      m_sequence.append (&m_x_position);
+      m_sequence.append (&m_y_position);
+      m_sequence.append (&m_width);
+      m_sequence.append (&m_height);
     }
 
-    void write_to_buffer_dispatch (ioa::buffer& buf,
-				   const pixel_format_t& server_format,
-				   const pixel_format_t& client_format,
-				   const void* source_data,
-				   const uint16_t source_width,
-				   const uint16_t source_height) const {
-      // These restrictions need to be relaxed later.
-      assert (server_format.bits_per_pixel == 32);
-      assert (server_format.bits_per_pixel == client_format.bits_per_pixel);
-      assert (server_format.depth == 24);
-      assert (server_format.depth == client_format.depth);
-      assert (server_format.big_endian_flag == client_format.big_endian_flag);
-      assert (server_format.true_colour_flag == client_format.true_colour_flag);
-      assert (server_format.red_max == client_format.red_max);
-      assert (server_format.green_max == client_format.green_max);
-      assert (server_format.blue_max == client_format.blue_max);
-      assert (server_format.red_shift == client_format.red_shift);
-      assert (server_format.green_shift == client_format.green_shift);
-      assert (server_format.blue_shift == client_format.blue_shift);
-
-      size_t offset = buf.size ();
-      size_t data_size = width * height * client_format.bits_per_pixel / 8;
-      buf.resize (buf.size () + data_size);
-      const uint32_t* source = reinterpret_cast<const uint32_t*> (source_data);
-      uint32_t* dest = reinterpret_cast<uint32_t*> (static_cast<char*> (buf.data ()) + offset);
-
-      for (uint16_t y = 0; y < height; ++y) {
-	for (uint16_t x = 0; x < width; ++x) {
-	  const uint16_t x_pos = x_position + x;
-	  const uint16_t y_pos = y_position + y;
-	  *dest = source[y_pos * source_width + x_pos];
-	  ++dest;
-	}
+    void put (rgram::buffer& buf) {
+      assert (!done ());
+      if (!m_sequence.done ()) {
+	m_sequence.put (buf);
       }
+      if (m_sequence.done ()) {
+	m_encoding_choice.set_dimensions (m_x_position.get (),
+					  m_y_position.get (),
+					  m_width.get (),
+					  m_height.get ());
+	m_encoding_choice.put (buf);
+      }
+    }
+
+    bool done () const {
+      return m_encoding_choice.done ();
+    }
+
+    void reset () {
+      m_sequence.reset ();
+      m_encoding_choice.reset ();
+    }
+
+    void add_encoding (const int32_t type,
+		       pixel_data_gramel* gramel) {
+      m_encoding_choice.add_encoding (type, gramel);
     }
   };
 
   struct framebuffer_update_t
   {
-    uint8_t message_type;
-    std::vector<ioa::shared_ptr<rectangle_t> > rectangles;
+    std::vector<rectangle_t> rectangles;
 
-    framebuffer_update_t () :
-      message_type (0)
+    framebuffer_update_t ()
     { }
 
-    void add_rectangle (rectangle_t* rect) {
-      if (rect != 0) {
-	rectangles.push_back (ioa::shared_ptr<rectangle_t> (rect));
-      }
+    framebuffer_update_t (const std::vector<rectangle_t>& rects) :
+      rectangles (rects)
+    { }
+
+    void add_rectangle (const rectangle_t& rect) {
+      rectangles.push_back (rect);
     }
 
-    static bool could_read_from_buffer (const ioa::buffer& buf,
-					const pixel_format_t& format) {
-      if (buf.size () >= 4) {
-	const uint8_t* data = static_cast<const uint8_t*> (buf.data ());
-	const uint8_t* end = data + buf.size ();
-	if (*data == 0) {
-	  // Skip over message type and padding.
-	  data += 2;
-	  const uint16_t number_of_rectangles = ntohs (*reinterpret_cast<const uint16_t*> (data));
-	  data += 2;
-	  for (uint16_t i = 0; i < number_of_rectangles; ++i) {
-	    if (end - data >= 16) {
-	      // Skip over positions.
-	      data += 4;
-	      // Get the width and height.
-	      const uint16_t width = ntohs (*reinterpret_cast<const uint16_t*> (data));
-	      data += 2;
-	      const uint16_t height = ntohs (*reinterpret_cast<const uint16_t*> (data));
-	      data += 2;
-	      const int32_t encoding_type = ntohl (*reinterpret_cast<const int32_t*> (data));
-	      data += 4;
-	      switch (encoding_type) {
-	      case RAW:
-		data += width * height * format.bits_per_pixel / 8;
-		if (end - data < 0) {
-		  return false;
-		}
-		break;
-	      default:
-		// Unknown encoding.
-		assert (false);
-	      }
-	    }
-	    else {
-	      return false;
-	    }
-	  }
-	  // Made it through all the rectangles.
-	  return true;
-	}
-      }
-
-      return false;
-    }
-
-    void read_from_buffer (ioa::buffer& buf,
-			   const pixel_format_t& format,
-			   void* destination_data,
-			   const uint16_t destination_width,
-			   const uint16_t destination_height) {
-      const uint8_t* data = static_cast<const uint8_t*> (buf.data ());
-      message_type = *data;
-      // Skip over padding.
-      data += 2;
-      const uint16_t number_of_rectangles = ntohs (*reinterpret_cast<const uint16_t*> (data));
-      data += sizeof (uint16_t);
-      for (uint16_t i = 0; i < number_of_rectangles; ++i) {
-	// Get the position.
-	const uint16_t x_position = ntohs (*reinterpret_cast<const uint16_t*> (data));
-	data += sizeof (uint16_t);
-	const uint16_t y_position = ntohs (*reinterpret_cast<const uint16_t*> (data));
-	data += sizeof (uint16_t);
-	// Get the width and height.
-	const uint16_t width = ntohs (*reinterpret_cast<const uint16_t*> (data));
-	data += sizeof (uint16_t);
-	const uint16_t height = ntohs (*reinterpret_cast<const uint16_t*> (data));
-	data += sizeof (uint16_t);
-	// Get the encoding.
-	const int32_t encoding_type = ntohl (*reinterpret_cast<const int32_t*> (data));
-	data += sizeof (int32_t);
-	switch (encoding_type) {
-	case RAW:
-	  assert (format.bits_per_pixel == 32);
-	  assert (format.depth == 24);
-	  const uint32_t* source = reinterpret_cast<const uint32_t*> (data);
-	  uint32_t* destination = static_cast<uint32_t*> (destination_data);
-	  for (uint16_t y = 0; y < height; ++y) {
-	    for (uint16_t x = 0; x < width; ++x) {
-	      const uint16_t x_pos = x_position + x;
-	      const uint16_t y_pos = y_position + y;
-	      if (x_pos < destination_width && y_pos < destination_height) {
-		destination[y_pos * destination_width + x_pos] = *source;
-	      }
-	      ++source;
-	    }
-	  }
-	  // Skip the data.
-	  data += width * height * format.bits_per_pixel / 8;
-	  break;
-	default:
-	  // Unknown encoding.
-	  assert (false);
-	}
-      }
-
-      // Consume the bytes.
-      buf.consume (data - static_cast<uint8_t*> (buf.data ()));
-    }
-
-    void write_to_buffer (ioa::buffer& buf,
-			  const pixel_format_t& server_format,
-			  const pixel_format_t& client_format,
-			  const void* source_data,
-			  const uint16_t source_width,
-			  const uint16_t source_height) const {
-      buf.append (&message_type, sizeof (message_type));
+    void write_to_buffer (ioa::buffer& buf) const {
+      buf.append (&FRAMEBUFFER_UPDATE_TYPE, sizeof (FRAMEBUFFER_UPDATE_TYPE));
       buf.resize (buf.size () + 1);
       uint16_t number_of_rectangles = htons (rectangles.size ());
       buf.append (&number_of_rectangles, sizeof (number_of_rectangles));
-      for (std::vector<ioa::shared_ptr<rectangle_t> >::const_iterator pos = rectangles.begin ();
-	   pos != rectangles.end ();
-	   ++pos) {
-	(*pos)->write_to_buffer (buf, server_format, client_format, source_data, source_width, source_height);
+      for (std::vector<rectangle_t>::const_iterator pos = rectangles.begin ();
+      	   pos != rectangles.end ();
+      	   ++pos) {
+      	(*pos).write_to_buffer (buf);
       }
+    }
+    
+  };
+  
+  struct rectangles_gramel :
+    public rgram::gramel
+  {
+    rectangle_gramel m_rectangle;
+    size_t m_expected_count;
+    size_t m_count;
+    bool m_count_set;
+
+    rectangles_gramel () :
+      m_expected_count (0),
+      m_count (0),
+      m_count_set (false)
+    { }
+
+    void put (rgram::buffer& buf) {
+      assert (!done ());
+      m_rectangle.put (buf);
+      if (m_rectangle.done ()) {
+	++m_count;
+	m_rectangle.reset ();
+      }
+    }
+
+    bool done () const {
+      return m_count_set && m_count == m_expected_count;
+    }
+
+    void reset () {
+      m_rectangle.reset ();
+      m_expected_count = 0;
+      m_count = 0;
+      m_count_set = false;
+    }
+
+    void set_count (const size_t c) {
+      m_expected_count = c;
+      m_count_set = true;
+    }
+
+    void add_encoding (const int32_t type,
+		       pixel_data_gramel* gramel) {
+      m_rectangle.add_encoding (type, gramel);
+    }
+
+  };
+
+  struct framebuffer_update_gramel :
+    public rgram::gramel
+  {
+    rgram::uint8_gramel m_padding;
+    rgram::uint16_gramel m_number_of_rectangles;
+    rgram::sequence_gramel m_sequence;
+    rectangles_gramel m_rectangles;
+
+    framebuffer_update_gramel ()
+    {
+      m_sequence.append (&m_padding);
+      m_sequence.append (&m_number_of_rectangles);
+    }
+
+    void put (rgram::buffer& buf) {
+      assert (!done ());
+      if (!m_sequence.done ()) {
+	m_sequence.put (buf);
+      }
+      if (m_sequence.done ()) {
+	m_rectangles.set_count (m_number_of_rectangles.get ());
+	m_rectangles.put (buf);
+      }
+    }
+
+    bool done () const {
+      return m_rectangles.done ();
+    }
+
+    void reset () {
+      m_sequence.reset ();
+      m_rectangles.reset ();
+    }
+
+    void add_encoding (const int32_t type,
+		       pixel_data_gramel* gramel) {
+      m_rectangles.add_encoding (type, gramel);
+    }
+  };
+
+  struct server_message_gramel :
+    public rgram::gramel
+  {
+    framebuffer_update_gramel m_framebuffer_update;
+    rgram::choice_gramel<rgram::uint8_gramel> m_choice;
+
+    server_message_gramel ()
+    {
+      m_choice.choices.insert (std::make_pair (FRAMEBUFFER_UPDATE_TYPE, &m_framebuffer_update));
+    }
+
+    void put (rgram::buffer& buf) {
+      assert (!done ());
+      m_choice.put (buf);
+    }
+
+    bool done () const {
+      return m_choice.done ();
+    }
+
+    void reset () {
+      m_choice.reset ();
+    }
+
+    void add_encoding (const int32_t type,
+		       pixel_data_gramel* gramel) {
+      m_framebuffer_update.add_encoding (type, gramel);
     }
 
   };
